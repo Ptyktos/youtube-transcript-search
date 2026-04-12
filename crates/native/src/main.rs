@@ -84,7 +84,8 @@ async fn run_sse_server(server: TranscriptServer, addr: &str) -> Result<()> {
 
     tracing::info!("Listening on http://{addr} — SSE: /sse, messages: /message");
 
-    let _ct = sse_server.with_service(move || server.clone());
+    // Holds the service guard alive until shutdown; dropping it cancels the service.
+    let _service_guard = sse_server.with_service(move || server.clone());
 
     // Wait for cancellation (Ctrl-C or signal)
     tokio::signal::ctrl_c()

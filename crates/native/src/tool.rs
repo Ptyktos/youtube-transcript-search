@@ -3,21 +3,19 @@ use rmcp::{
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     tool, ServerHandler,
 };
-use std::sync::Arc;
+use youtube_transcript_mcp_core::TranscriptError;
 
 use crate::fetch::get_transcript;
 
 #[derive(Debug, Clone)]
 pub struct TranscriptServer {
-    client: Arc<Client>,
+    client: Client,
 }
 
 impl TranscriptServer {
     #[must_use]
     pub fn new(client: Client) -> Self {
-        Self {
-            client: Arc::new(client),
-        }
+        Self { client }
     }
 }
 
@@ -42,7 +40,12 @@ impl TranscriptServer {
         get_transcript(&self.client, &url, lang)
             .await
             .map(|r| CallToolResult::success(vec![Content::text(r.text)]))
-            .map_err(|e| rmcp::Error::invalid_params(e.to_string(), None))
+            .map_err(|e| match &e {
+                TranscriptError::InvalidUrl | TranscriptError::InvalidVideoId => {
+                    rmcp::Error::invalid_params(e.to_string(), None)
+                }
+                _ => rmcp::Error::internal_error(e.to_string(), None),
+            })
     }
 }
 
