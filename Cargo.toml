@@ -15,10 +15,21 @@ strip = true
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# Panic prevention
 unwrap_used = "deny"
 expect_used = "warn"
 panic = "deny"
+panic_in_result_fn = "deny"
+unimplemented = "deny"
+# No cheating
+allow_attributes = "deny"
+# Code hygiene
 dbg_macro = "deny"
 todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+# Safety
+exit = "deny"
+# Pedantic relaxations (too noisy)
 module_name_repetitions = "allow"
 similar_names = "allow"
