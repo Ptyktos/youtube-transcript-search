@@ -1,9 +1,13 @@
 [package]
 name = "youtube-transcript-mcp-worker"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 description = "YouTube Transcript MCP server — Cloudflare Workers"
+
+# Standalone workspace so wrangler can build with wasm32-unknown-unknown
+# without needing the root workspace resolver.
+[workspace]
 
 [lib]
 crate-type = ["cdylib"]
