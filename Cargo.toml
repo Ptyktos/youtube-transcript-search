@@ -12,3 +12,13 @@ license = "MIT"
 opt-level = "z"
 lto = true
 strip = true
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+dbg_macro = "deny"
+todo = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"

@@ -17,11 +17,16 @@ const VALID_HOSTS: &[&str] = &[
     "youtube.co.kr",
 ];
 
-/// A validated YouTube video ID — exactly 11 chars matching `[A-Za-z0-9_-]`.
+/// A validated `YouTube` video ID — exactly 11 chars matching `[A-Za-z0-9_-]`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VideoId(String);
 
 impl VideoId {
+    /// Parse a raw string into a validated `VideoId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidVideoId` if the string is not exactly 11 `[A-Za-z0-9_-]` characters.
     pub fn parse(s: &str) -> Result<Self, TranscriptError> {
         if s.len() == 11
             && s.chars()
@@ -33,6 +38,8 @@ impl VideoId {
         }
     }
 
+    /// Return the inner video ID string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -44,6 +51,16 @@ impl std::fmt::Display for VideoId {
     }
 }
 
+/// Extract and validate a `YouTube` video ID from any supported URL format.
+///
+/// Accepts `watch?v=`, `youtu.be/`, `/shorts/`, `/live/`, `/embed/` paths,
+/// with or without scheme, across all supported `YouTube` TLDs.
+///
+/// # Errors
+///
+/// Returns `InvalidUrl` if the URL cannot be parsed, the host is not a recognised
+/// `YouTube` domain, or no video ID path segment is present.
+/// Returns `InvalidVideoId` if the extracted ID fails validation.
 pub fn extract_video_id(raw: &str) -> Result<VideoId, TranscriptError> {
     let normalized = if raw.starts_with("http://") || raw.starts_with("https://") {
         raw.to_string()
@@ -76,7 +93,10 @@ pub fn extract_video_id(raw: &str) -> Result<VideoId, TranscriptError> {
             || path.starts_with("/live/")
             || path.starts_with("/embed/")
         {
-            path.split('/').nth(2).filter(|s| !s.is_empty()).map(str::to_string)
+            path.split('/')
+                .nth(2)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
         } else {
             None
         }
@@ -123,10 +143,8 @@ mod tests {
 
     #[test]
     fn strips_tracking_params() {
-        let id = extract_video_id(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc123&t=30s",
-        )
-        .unwrap();
+        let id = extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc123&t=30s")
+            .unwrap();
         assert_eq!(id.as_str(), "dQw4w9WgXcQ");
     }
 

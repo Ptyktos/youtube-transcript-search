@@ -9,6 +9,9 @@ description = "YouTube Transcript MCP server — native binary"
 name = "youtube-transcript-mcp"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 youtube-transcript-mcp-core = { path = "../core" }
 rmcp = { version = "0.1", features = ["server", "transport-io", "transport-sse-server"] }
