@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+# worker is compiled by wrangler (wasm32-unknown-unknown), not cargo build --workspace
+members = ["crates/core", "crates/native"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
