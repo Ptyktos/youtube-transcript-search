@@ -2,8 +2,9 @@ pub const AUTO_DETECT_ORDER: &[&str] = &[
     "en", "es", "fr", "de", "tr", "pt", "ja", "ko", "zh", "it", "ru", "ar",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Language {
+    #[default]
     Auto,
     Specific(String),
 }
