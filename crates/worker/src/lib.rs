@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use worker::*;
 use youtube_transcript_mcp_core::{
-    extract_video_id, parse_transcript_xml, parse_youtube_page, select_track, user_agent,
-    watch_url, Language, TranscriptError,
+    extract_video_id, innertube_body, parse_innertube_response, parse_transcript_xml, select_track,
+    Language, TranscriptError, INNERTUBE_URL, USER_AGENT,
 };
 
 // ── JSON-RPC types ────────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ fn sse_response(body: &impl Serialize) -> Result<Response> {
 async fn fetch_text(url: &str) -> std::result::Result<String, TranscriptError> {
     let mut headers = Headers::new();
     headers
-        .set("User-Agent", user_agent())
+        .set("User-Agent", USER_AGENT)
         .map_err(|e| TranscriptError::Network(e.to_string()))?;
 
     let mut init = RequestInit::new();
@@ -111,6 +111,45 @@ async fn fetch_text(url: &str) -> std::result::Result<String, TranscriptError> {
         .map_err(|e| TranscriptError::Network(e.to_string()))
 }
 
+async fn fetch_innertube(video_id: &youtube_transcript_mcp_core::VideoId) -> std::result::Result<String, TranscriptError> {
+    let body = innertube_body(video_id);
+    let body_str = serde_json::to_string(&body)
+        .map_err(|e| TranscriptError::Parse(e.to_string()))?;
+
+    let mut headers = Headers::new();
+    headers
+        .set("Content-Type", "application/json")
+        .map_err(|e| TranscriptError::Network(e.to_string()))?;
+    headers
+        .set("User-Agent", USER_AGENT)
+        .map_err(|e| TranscriptError::Network(e.to_string()))?;
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(wasm_bindgen::JsValue::from_str(&body_str)));
+
+    let request = Request::new_with_init(INNERTUBE_URL, &init)
+        .map_err(|e| TranscriptError::Network(e.to_string()))?;
+
+    let mut response = Fetch::Request(request)
+        .send()
+        .await
+        .map_err(|e| TranscriptError::Network(e.to_string()))?;
+
+    if response.status_code() >= 400 {
+        return Err(TranscriptError::Network(format!(
+            "HTTP {} from Innertube",
+            response.status_code()
+        )));
+    }
+
+    response
+        .text()
+        .await
+        .map_err(|e| TranscriptError::Network(e.to_string()))
+}
+
 // ── Tool implementation ────────────────────────────────────────────────────────
 
 async fn handle_get_transcript(
@@ -124,11 +163,19 @@ async fn handle_get_transcript(
     let video_id = extract_video_id(url)?;
     let language: Language = language_str.parse().unwrap_or_default();
 
-    let page_html = fetch_text(&watch_url(&video_id)).await?;
-    let tracks = parse_youtube_page(&page_html)?;
+    // Step 1: POST to Innertube
+    let innertube_json = fetch_innertube(&video_id).await?;
+
+    // Step 2: parse caption tracks
+    let tracks = parse_innertube_response(&innertube_json)?;
+
+    // Step 3: select track
     let (track, fallback_note) = select_track(&tracks, &language)?;
 
+    // Step 4: fetch XML
     let xml = fetch_text(&track.base_url).await?;
+
+    // Step 5: parse to plain text
     let raw_text = parse_transcript_xml(&xml)?;
 
     Ok(match fallback_note {

@@ -7,6 +7,6 @@ pub use error::TranscriptError;
 pub use language::{Language, AUTO_DETECT_ORDER};
 pub use url::{extract_video_id, VideoId};
 pub use youtube::{
-    parse_transcript_xml, parse_youtube_page, select_track, user_agent, watch_url, CaptionTrack,
-    TranscriptResult, USER_AGENT,
+    innertube_body, parse_innertube_response, parse_transcript_xml, select_track, user_agent,
+    CaptionTrack, TranscriptResult, INNERTUBE_URL, USER_AGENT,
 };

@@ -1,17 +1,16 @@
 use anyhow::Context as _;
 use reqwest::Client;
 use youtube_transcript_mcp_core::{
-    extract_video_id, parse_transcript_xml, parse_youtube_page, select_track, user_agent,
-    watch_url, Language, TranscriptError, TranscriptResult,
+    extract_video_id, innertube_body, parse_innertube_response, parse_transcript_xml, select_track,
+    Language, TranscriptError, TranscriptResult, INNERTUBE_URL, USER_AGENT,
 };
 
-/// Build a shared reqwest [`Client`] with the `YouTube` `User-Agent` header.
+/// Build a shared reqwest [`Client`] with sensible timeouts.
 ///
 /// # Errors
 /// Returns an error if the HTTP client cannot be constructed.
 pub fn build_client() -> anyhow::Result<Client> {
     Client::builder()
-        .user_agent(user_agent())
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
@@ -46,11 +45,34 @@ pub async fn get_transcript(
     let video_id = extract_video_id(url)?;
     let language: Language = language_str.parse().unwrap_or_default();
 
-    let page_html = get_text(client, &watch_url(&video_id)).await?;
-    let tracks = parse_youtube_page(&page_html)?;
+    // Step 1: POST to Innertube
+    let body = innertube_body(&video_id);
+    let body_bytes = serde_json::to_vec(&body)
+        .map_err(|e| TranscriptError::Parse(format!("Failed to serialize Innertube body: {e}")))?;
+    let innertube_json = client
+        .post(INNERTUBE_URL)
+        .header("User-Agent", USER_AGENT)
+        .header("Content-Type", "application/json")
+        .body(body_bytes)
+        .send()
+        .await
+        .map_err(|e| TranscriptError::Network(format!("POST {INNERTUBE_URL}: {e}")))?
+        .error_for_status()
+        .map_err(|e| TranscriptError::Network(format!("POST {INNERTUBE_URL}: {e}")))?
+        .text()
+        .await
+        .map_err(|e| TranscriptError::Network(format!("POST {INNERTUBE_URL}: {e}")))?;
+
+    // Step 2: parse caption tracks
+    let tracks = parse_innertube_response(&innertube_json)?;
+
+    // Step 3: select track
     let (track, fallback_note) = select_track(&tracks, &language)?;
 
+    // Step 4: fetch XML
     let xml = get_text(client, &track.base_url).await?;
+
+    // Step 5: parse to plain text
     let raw_text = parse_transcript_xml(&xml)?;
 
     let text = match fallback_note {

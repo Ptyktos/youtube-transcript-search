@@ -5,19 +5,32 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use serde::Deserialize;
 
-pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+pub const INNERTUBE_URL: &str = "https://www.youtube.com/youtubei/v1/player";
 
-/// Returns the `YouTube` watch page URL for a given video ID.
-#[must_use]
-pub fn watch_url(video_id: &VideoId) -> String {
-    format!("https://www.youtube.com/watch?v={}", video_id.as_str())
-}
+pub const USER_AGENT: &str =
+    "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip";
 
 /// Returns the `User-Agent` string used for all `YouTube` requests.
 #[must_use]
 pub fn user_agent() -> &'static str {
     USER_AGENT
+}
+
+/// Builds the JSON body for a POST to [`INNERTUBE_URL`].
+#[must_use]
+pub fn innertube_body(video_id: &VideoId) -> serde_json::Value {
+    serde_json::json!({
+        "context": {
+            "client": {
+                "clientName": "ANDROID",
+                "clientVersion": "20.10.38",
+                "androidSdkVersion": 30,
+                "hl": "en",
+                "gl": "US"
+            }
+        },
+        "videoId": video_id.as_str()
+    })
 }
 
 /// A single caption track available for a video.
@@ -38,12 +51,6 @@ pub struct TranscriptResult {
     pub language: String,
 }
 
-// Internal serde shapes for ytInitialPlayerResponse
-#[derive(Deserialize)]
-struct PlayerResponse {
-    captions: Option<CaptionsContainer>,
-}
-
 #[derive(Deserialize)]
 struct CaptionsContainer {
     #[serde(rename = "playerCaptionsTracklistRenderer")]
@@ -56,34 +63,41 @@ struct TracklistRenderer {
     caption_tracks: Option<Vec<CaptionTrack>>,
 }
 
-/// Extract the list of available caption tracks from a raw `YouTube` watch page HTML body.
+/// Parse the JSON response from the Innertube `/youtubei/v1/player` endpoint
+/// and return the available caption tracks.
 ///
-/// Returns an empty `Vec` (not an error) when the video has no captions at all.
+/// Returns an empty `Vec` when the video has no captions.
 ///
 /// # Errors
-/// Returns `TranscriptError::Parse` if `ytInitialPlayerResponse` is not found or malformed.
-pub fn parse_youtube_page(html: &str) -> Result<Vec<CaptionTrack>, TranscriptError> {
-    const MARKER: &str = "var ytInitialPlayerResponse = ";
+/// - `TranscriptError::Parse` if the JSON is malformed.
+/// - `TranscriptError::Parse` if playabilityStatus is not OK.
+pub fn parse_innertube_response(json: &str) -> Result<Vec<CaptionTrack>, TranscriptError> {
+    #[derive(Deserialize)]
+    struct InnertubeResponse {
+        #[serde(rename = "playabilityStatus")]
+        playability_status: Option<PlayabilityStatus>,
+        captions: Option<CaptionsContainer>,
+    }
 
-    let start = html.find(MARKER).ok_or_else(|| {
-        TranscriptError::Parse("Could not find ytInitialPlayerResponse in page".into())
+    #[derive(Deserialize)]
+    struct PlayabilityStatus {
+        status: String,
+        reason: Option<String>,
+    }
+
+    let response: InnertubeResponse = serde_json::from_str(json).map_err(|e| {
+        TranscriptError::Parse(format!("Failed to decode Innertube response: {e}"))
     })?;
 
-    let after = &html[start + MARKER.len()..];
-
-    // Find the earliest terminator — whichever pattern appears first wins.
-    let end = [
-        after.find(";</script>"),
-        after.find(";var "),
-        after.find(";\n"),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
-    .unwrap_or(after.len());
-
-    let response: PlayerResponse = serde_json::from_str(&after[..end])
-        .map_err(|e| TranscriptError::Parse(format!("Failed to decode player response: {e}")))?;
+    if let Some(ps) = &response.playability_status {
+        if ps.status != "OK" {
+            let reason = ps.reason.as_deref().unwrap_or("unknown");
+            return Err(TranscriptError::Parse(format!(
+                "Video not playable: {} — {reason}",
+                ps.status
+            )));
+        }
+    }
 
     Ok(response
         .captions
@@ -140,7 +154,8 @@ pub fn select_track<'a>(
 
 /// Parse a `YouTube` transcript XML response into a single plain-text string.
 ///
-/// `XML` entities (`&amp;`, `&lt;`, etc.) are unescaped automatically by `quick-xml`.
+/// Handles both `<text>` elements (legacy format) and `<p>` elements (Innertube format).
+/// XML entities (`&amp;`, `&lt;`, etc.) are unescaped automatically by `quick-xml`.
 ///
 /// # Errors
 /// Returns `TranscriptError::Parse` if the XML is malformed.
@@ -154,7 +169,9 @@ pub fn parse_transcript_xml(xml: &str) -> Result<String, TranscriptError> {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) if e.name().as_ref() == b"text" => {
+            Ok(Event::Start(ref e))
+                if e.name().as_ref() == b"p" || e.name().as_ref() == b"text" =>
+            {
                 in_text_element = true;
             }
             Ok(Event::Text(ref e)) if in_text_element => {
@@ -166,7 +183,9 @@ pub fn parse_transcript_xml(xml: &str) -> Result<String, TranscriptError> {
                     texts.push(trimmed);
                 }
             }
-            Ok(Event::End(ref e)) if e.name().as_ref() == b"text" => {
+            Ok(Event::End(ref e))
+                if e.name().as_ref() == b"p" || e.name().as_ref() == b"text" =>
+            {
                 in_text_element = false;
             }
             Ok(Event::Eof) => break,
@@ -184,35 +203,38 @@ mod tests {
     use super::*;
     use crate::language::Language;
 
-    // --- parse_youtube_page ---
+    // --- parse_innertube_response ---
 
     #[test]
-    fn extracts_caption_tracks_from_page() {
-        let html = concat!(
-            "<html><script>",
-            r#"var ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://example.com/caps","languageCode":"en"}]}}};"#,
-            "</script></html>"
-        );
-        let tracks = parse_youtube_page(html).unwrap();
+    fn parses_ok_response_with_tracks() {
+        let json = r#"{
+            "playabilityStatus": {"status": "OK"},
+            "captions": {
+                "playerCaptionsTracklistRenderer": {
+                    "captionTracks": [
+                        {"baseUrl": "https://example.com/caps", "languageCode": "en"}
+                    ]
+                }
+            }
+        }"#;
+        let tracks = parse_innertube_response(json).unwrap();
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].language_code, "en");
-        assert_eq!(tracks[0].base_url, "https://example.com/caps");
     }
 
     #[test]
-    fn returns_empty_when_no_captions_key() {
-        let html = concat!(
-            "<html><script>",
-            r#"var ytInitialPlayerResponse = {"videoDetails":{"videoId":"abc"}};"#,
-            "</script></html>"
-        );
-        let tracks = parse_youtube_page(html).unwrap();
+    fn returns_empty_when_no_captions() {
+        let json = r#"{"playabilityStatus": {"status": "OK"}}"#;
+        let tracks = parse_innertube_response(json).unwrap();
         assert!(tracks.is_empty());
     }
 
     #[test]
-    fn errors_when_marker_absent() {
-        assert!(parse_youtube_page("<html><script>var something = {};</script></html>").is_err());
+    fn errors_on_unplayable_status() {
+        let json =
+            r#"{"playabilityStatus": {"status": "UNPLAYABLE", "reason": "Video unavailable"}}"#;
+        let err = parse_innertube_response(json).unwrap_err();
+        assert!(err.to_string().contains("UNPLAYABLE"));
     }
 
     // --- select_track ---
@@ -314,5 +336,14 @@ mod tests {
     fn returns_empty_string_for_empty_transcript() {
         let xml = r#"<?xml version="1.0"?><transcript></transcript>"#;
         assert_eq!(parse_transcript_xml(xml).unwrap(), "");
+    }
+
+    #[test]
+    fn parses_innertube_p_element_xml() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?><timedtext format="3"><body>
+<p t="1360" d="1680">Hello world</p>
+<p t="3000" d="2000">This is a test</p>
+</body></timedtext>"#;
+        assert_eq!(parse_transcript_xml(xml).unwrap(), "Hello world This is a test");
     }
 }
