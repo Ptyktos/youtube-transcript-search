@@ -16,7 +16,7 @@ workspace = true
 youtube-transcript-mcp-core = { path = "../core" }
 rmcp = { version = "0.1", features = ["server", "transport-io", "transport-sse-server"] }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "stream"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

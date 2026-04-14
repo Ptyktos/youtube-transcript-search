@@ -51,6 +51,26 @@ pub struct TranscriptResult {
     pub language: String,
 }
 
+/// The best available audio-only stream for a video, used as Whisper input.
+#[derive(Debug, Clone)]
+pub struct AudioStream {
+    /// Direct URL to the audio stream.
+    pub url: String,
+    /// MIME type, e.g. `"audio/mp4; codecs=\"mp4a.40.2\""`.
+    pub mime_type: String,
+    /// Average bitrate in bits per second.
+    pub bitrate: u64,
+}
+
+/// Parsed output of the Innertube `/youtubei/v1/player` response.
+#[derive(Debug, Clone)]
+pub struct InnertubeData {
+    /// Available caption tracks (empty if none).
+    pub caption_tracks: Vec<CaptionTrack>,
+    /// Audio-only streams, sorted by bitrate descending.
+    pub audio_streams: Vec<AudioStream>,
+}
+
 #[derive(Deserialize)]
 struct CaptionsContainer {
     #[serde(rename = "playerCaptionsTracklistRenderer")]
@@ -63,26 +83,43 @@ struct TracklistRenderer {
     caption_tracks: Option<Vec<CaptionTrack>>,
 }
 
-/// Parse the JSON response from the Innertube `/youtubei/v1/player` endpoint
-/// and return the available caption tracks.
+/// Parse the JSON response from the Innertube `/youtubei/v1/player` endpoint.
 ///
-/// Returns an empty `Vec` when the video has no captions.
+/// Returns caption tracks (empty if none) and audio-only streams sorted by bitrate descending
+/// (mp4 preferred over webm for wider compatibility).
 ///
 /// # Errors
 /// - `TranscriptError::Parse` if the JSON is malformed.
 /// - `TranscriptError::Parse` if playabilityStatus is not OK.
-pub fn parse_innertube_response(json: &str) -> Result<Vec<CaptionTrack>, TranscriptError> {
+pub fn parse_innertube_response(json: &str) -> Result<InnertubeData, TranscriptError> {
     #[derive(Deserialize)]
     struct InnertubeResponse {
         #[serde(rename = "playabilityStatus")]
         playability_status: Option<PlayabilityStatus>,
         captions: Option<CaptionsContainer>,
+        #[serde(rename = "streamingData")]
+        streaming_data: Option<StreamingData>,
     }
 
     #[derive(Deserialize)]
     struct PlayabilityStatus {
         status: String,
         reason: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct StreamingData {
+        #[serde(rename = "adaptiveFormats")]
+        adaptive_formats: Option<Vec<AdaptiveFormat>>,
+    }
+
+    #[derive(Deserialize)]
+    struct AdaptiveFormat {
+        #[serde(rename = "mimeType")]
+        mime_type: Option<String>,
+        url: Option<String>,
+        #[serde(rename = "averageBitrate")]
+        average_bitrate: Option<u64>,
     }
 
     let response: InnertubeResponse = serde_json::from_str(json).map_err(|e| {
@@ -99,11 +136,42 @@ pub fn parse_innertube_response(json: &str) -> Result<Vec<CaptionTrack>, Transcr
         }
     }
 
-    Ok(response
+    let caption_tracks = response
         .captions
         .and_then(|c| c.renderer)
         .and_then(|r| r.caption_tracks)
-        .unwrap_or_default())
+        .unwrap_or_default();
+
+    let mut audio_streams: Vec<AudioStream> = response
+        .streaming_data
+        .and_then(|sd| sd.adaptive_formats)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|f| {
+            let mime_type = f.mime_type?;
+            let url = f.url?;
+            if !mime_type.starts_with("audio/") {
+                return None;
+            }
+            Some(AudioStream {
+                url,
+                bitrate: f.average_bitrate.unwrap_or(0),
+                mime_type,
+            })
+        })
+        .collect();
+
+    // Highest bitrate first — prefer mp4 audio over webm for wider compatibility
+    audio_streams.sort_by(|a, b| {
+        let a_mp4 = a.mime_type.contains("mp4");
+        let b_mp4 = b.mime_type.contains("mp4");
+        b_mp4.cmp(&a_mp4).then(b.bitrate.cmp(&a.bitrate))
+    });
+
+    Ok(InnertubeData {
+        caption_tracks,
+        audio_streams,
+    })
 }
 
 /// Select the best caption track for the requested language.
@@ -217,16 +285,16 @@ mod tests {
                 }
             }
         }"#;
-        let tracks = parse_innertube_response(json).unwrap();
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].language_code, "en");
+        let data = parse_innertube_response(json).unwrap();
+        assert_eq!(data.caption_tracks.len(), 1);
+        assert_eq!(data.caption_tracks[0].language_code, "en");
     }
 
     #[test]
     fn returns_empty_when_no_captions() {
         let json = r#"{"playabilityStatus": {"status": "OK"}}"#;
-        let tracks = parse_innertube_response(json).unwrap();
-        assert!(tracks.is_empty());
+        let data = parse_innertube_response(json).unwrap();
+        assert!(data.caption_tracks.is_empty());
     }
 
     #[test]
@@ -336,6 +404,24 @@ mod tests {
     fn returns_empty_string_for_empty_transcript() {
         let xml = r#"<?xml version="1.0"?><transcript></transcript>"#;
         assert_eq!(parse_transcript_xml(xml).unwrap(), "");
+    }
+
+    #[test]
+    fn extracts_audio_streams() {
+        let json = r#"{
+            "playabilityStatus": {"status": "OK"},
+            "streamingData": {
+                "adaptiveFormats": [
+                    {"mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "url": "https://example.com/audio.mp4", "averageBitrate": 128000},
+                    {"mimeType": "video/mp4; codecs=\"avc1\"", "url": "https://example.com/video.mp4", "averageBitrate": 500000},
+                    {"mimeType": "audio/webm; codecs=\"opus\"", "url": "https://example.com/audio.webm", "averageBitrate": 64000}
+                ]
+            }
+        }"#;
+        let data = parse_innertube_response(json).unwrap();
+        assert_eq!(data.audio_streams.len(), 2);
+        assert!(data.audio_streams[0].mime_type.contains("mp4")); // mp4 sorted first
+        assert_eq!(data.audio_streams[0].bitrate, 128000);
     }
 
     #[test]
