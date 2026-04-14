@@ -71,11 +71,16 @@ pub fn parse_youtube_page(html: &str) -> Result<Vec<CaptionTrack>, TranscriptErr
 
     let after = &html[start + MARKER.len()..];
 
-    let end = after
-        .find(";</script>")
-        .or_else(|| after.find(";var "))
-        .or_else(|| after.find(";\n"))
-        .unwrap_or(after.len());
+    // Find the earliest terminator — whichever pattern appears first wins.
+    let end = [
+        after.find(";</script>"),
+        after.find(";var "),
+        after.find(";\n"),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(after.len());
 
     let response: PlayerResponse = serde_json::from_str(&after[..end])
         .map_err(|e| TranscriptError::Parse(format!("Failed to decode player response: {e}")))?;
