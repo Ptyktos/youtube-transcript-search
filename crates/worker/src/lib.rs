@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use worker::*;
 use youtube_transcript_mcp_core::{
     extract_video_id, innertube_body, parse_innertube_response, parse_transcript_xml, select_track,
-    Language, TranscriptError, INNERTUBE_URL, USER_AGENT,
+    InnertubeData, Language, TranscriptError, INNERTUBE_URL, USER_AGENT,
 };
 
 // ── JSON-RPC types ────────────────────────────────────────────────────────────
@@ -166,11 +166,11 @@ async fn handle_get_transcript(
     // Step 1: POST to Innertube
     let innertube_json = fetch_innertube(&video_id).await?;
 
-    // Step 2: parse caption tracks
-    let tracks = parse_innertube_response(&innertube_json)?;
+    // Step 2: parse caption tracks (audio_streams ignored — Whisper fallback is native-only)
+    let InnertubeData { caption_tracks, .. } = parse_innertube_response(&innertube_json)?;
 
     // Step 3: select track
-    let (track, fallback_note) = select_track(&tracks, &language)?;
+    let (track, fallback_note) = select_track(&caption_tracks, &language)?;
 
     // Step 4: fetch XML
     let xml = fetch_text(&track.base_url).await?;

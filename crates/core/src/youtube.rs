@@ -7,8 +7,7 @@ use serde::Deserialize;
 
 pub const INNERTUBE_URL: &str = "https://www.youtube.com/youtubei/v1/player";
 
-pub const USER_AGENT: &str =
-    "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip";
+pub const USER_AGENT: &str = "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip";
 
 /// Returns the `User-Agent` string used for all `YouTube` requests.
 #[must_use]
@@ -122,9 +121,8 @@ pub fn parse_innertube_response(json: &str) -> Result<InnertubeData, TranscriptE
         average_bitrate: Option<u64>,
     }
 
-    let response: InnertubeResponse = serde_json::from_str(json).map_err(|e| {
-        TranscriptError::Parse(format!("Failed to decode Innertube response: {e}"))
-    })?;
+    let response: InnertubeResponse = serde_json::from_str(json)
+        .map_err(|e| TranscriptError::Parse(format!("Failed to decode Innertube response: {e}")))?;
 
     if let Some(ps) = &response.playability_status {
         if ps.status != "OK" {
@@ -251,9 +249,7 @@ pub fn parse_transcript_xml(xml: &str) -> Result<String, TranscriptError> {
                     texts.push(trimmed);
                 }
             }
-            Ok(Event::End(ref e))
-                if e.name().as_ref() == b"p" || e.name().as_ref() == b"text" =>
-            {
+            Ok(Event::End(ref e)) if e.name().as_ref() == b"p" || e.name().as_ref() == b"text" => {
                 in_text_element = false;
             }
             Ok(Event::Eof) => break,
@@ -430,6 +426,9 @@ mod tests {
 <p t="1360" d="1680">Hello world</p>
 <p t="3000" d="2000">This is a test</p>
 </body></timedtext>"#;
-        assert_eq!(parse_transcript_xml(xml).unwrap(), "Hello world This is a test");
+        assert_eq!(
+            parse_transcript_xml(xml).unwrap(),
+            "Hello world This is a test"
+        );
     }
 }
