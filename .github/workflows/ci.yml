@@ -48,4 +48,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check worker crate
-        run: cargo check -p youtube-transcript-mcp-worker --target wasm32-unknown-unknown
+        run: cargo check --manifest-path crates/worker/Cargo.toml --target wasm32-unknown-unknown
+
+      - name: Clippy worker crate
+        run: cargo clippy --manifest-path crates/worker/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
