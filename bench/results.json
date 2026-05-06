@@ -1,0 +1,76 @@
+{
+  "profiles": [
+    {
+      "profile": "LAN (mock returns instantly)",
+      "delay_ms": 0,
+      "rows": [
+        {
+          "label": "this repo \u2014 Rust, MCP stdio",
+          "cold_ms": 9.429385000000003,
+          "sum_ms": 104.60868899999997,
+          "tput": 477.9717677180718,
+          "p50": 1.8630599999999902,
+          "p95": 3.080999799999998,
+          "p99": 3.8067630700000006,
+          "rss_kib": 5928
+        },
+        {
+          "label": "anaisbetts/mcp-youtube (Node + simulated yt-dlp)",
+          "cold_ms": 140.92338900000001,
+          "sum_ms": 377.0449299999998,
+          "tput": 132.61019051496072,
+          "p50": 6.964595999999972,
+          "p95": 10.283760649999966,
+          "p99": 15.660447299999966,
+          "rss_kib": 75468
+        },
+        {
+          "label": "nabid-pf summarizer (Node + youtube-caption-extractor)",
+          "cold_ms": 336.980107,
+          "sum_ms": 462.31356900000003,
+          "tput": 108.15170341669119,
+          "p50": 6.6318105,
+          "p95": 12.320772700000008,
+          "p99": 61.04878397999981,
+          "rss_kib": 117132
+        }
+      ]
+    },
+    {
+      "profile": "PROD-sim (80 ms RTT per response \u2014 typical YouTube edge)",
+      "delay_ms": 80,
+      "rows": [
+        {
+          "label": "this repo \u2014 Rust, MCP stdio",
+          "cold_ms": 170.662067,
+          "sum_ms": 8212.107301999999,
+          "tput": 6.0885711987497855,
+          "p50": 164.0838934999997,
+          "p95": 164.62691080000027,
+          "p99": 167.66228737999998,
+          "rss_kib": 5592
+        },
+        {
+          "label": "anaisbetts/mcp-youtube (Node + simulated yt-dlp)",
+          "cold_ms": 636.5153779999999,
+          "sum_ms": 25268.555017999995,
+          "tput": 1.978743935471681,
+          "p50": 504.7385054999995,
+          "p95": 511.39601109999967,
+          "p99": 513.7091380999994,
+          "rss_kib": 73468
+        },
+        {
+          "label": "nabid-pf summarizer (Node + youtube-caption-extractor)",
+          "cold_ms": 488.26851800000003,
+          "sum_ms": 8622.897561000002,
+          "tput": 5.798514901318331,
+          "p50": 170.12289150000015,
+          "p95": 174.74112864999998,
+          "p99": 223.55905864999983,
+          "rss_kib": 118584
+        }
+      ]
+    }
+  ]
+}

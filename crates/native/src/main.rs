@@ -1,26 +1,37 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use rmcp::ServiceExt as _;
+use std::io::Write as _;
 
 mod fetch;
+mod http;
 mod tool;
 
-use fetch::build_client;
+use fetch::{build_client, get_transcript};
 use tool::TranscriptServer;
 
 #[derive(Parser)]
 #[command(
     name = "youtube-transcript-mcp",
     about = "YouTube Transcript MCP Server",
-    long_about = "Exposes a single MCP tool `get_transcript` that fetches the full \
-                  transcript of any YouTube video.\n\n\
-                  Use --stdio for Claude Desktop and local MCP clients.\n\
-                  Default: HTTP/SSE server."
+    long_about = "Fetches the full transcript of a YouTube video.\n\n\
+                  Modes:\n  \
+                  --url <URL>   one-shot CLI: print transcript to stdout and exit\n  \
+                  --stdio       MCP stdio transport (Claude Desktop, local clients)\n  \
+                  default       HTTP server with /transcript, /mcp, /sse"
 )]
 struct Cli {
-    /// Use stdio transport (for Claude Desktop and local MCP clients)
-    #[arg(long)]
+    /// Use MCP stdio transport (for Claude Desktop and local MCP clients)
+    #[arg(long, conflicts_with = "url")]
     stdio: bool,
+
+    /// One-shot mode: print the transcript for this URL to stdout and exit
+    #[arg(long, value_name = "URL")]
+    url: Option<String>,
+
+    /// Language code (with --url). Defaults to `auto`.
+    #[arg(long, default_value = "auto")]
+    language: String,
 
     /// Host to bind the HTTP server to
     #[arg(long, default_value = "127.0.0.1", env = "HOST")]
@@ -43,10 +54,14 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let client = build_client()?;
-    let server = TranscriptServer::new(client);
+
+    if let Some(url) = cli.url.as_deref() {
+        return run_oneshot(client, url, &cli.language).await;
+    }
 
     if cli.stdio {
         tracing::info!("Starting in stdio mode");
+        let server = TranscriptServer::new(client);
         let service = server
             .serve(rmcp::transport::stdio())
             .await
@@ -55,44 +70,20 @@ async fn main() -> Result<()> {
             .waiting()
             .await
             .context("stdio server exited with error")?;
-    } else {
-        let addr = format!("{}:{}", cli.host, cli.port);
-        tracing::info!("Starting HTTP/SSE server on http://{addr}");
-        run_sse_server(server, &addr).await?;
+        return Ok(());
     }
 
-    Ok(())
+    let addr = format!("{}:{}", cli.host, cli.port);
+    tracing::info!("Starting HTTP server on http://{addr}");
+    http::serve(client, &addr).await
 }
 
-async fn run_sse_server(server: TranscriptServer, addr: &str) -> Result<()> {
-    use rmcp::transport::sse_server::{SseServer, SseServerConfig};
-    use tokio_util::sync::CancellationToken;
-
-    let bind: std::net::SocketAddr = addr.parse().context("Invalid bind address")?;
-    let ct = CancellationToken::new();
-
-    let config = SseServerConfig {
-        bind,
-        sse_path: "/sse".to_string(),
-        post_path: "/message".to_string(),
-        ct: ct.clone(),
-    };
-
-    let sse_server = SseServer::serve_with_config(config)
+async fn run_oneshot(client: reqwest::Client, url: &str, language: &str) -> Result<()> {
+    let result = get_transcript(&client, url, language)
         .await
-        .context("Failed to start SSE server")?;
-
-    tracing::info!("Listening on http://{addr} — SSE: /sse, messages: /message");
-
-    // Holds the service guard alive until shutdown; dropping it cancels the service.
-    let _service_guard = sse_server.with_service(move || server.clone());
-
-    // Wait for cancellation (Ctrl-C or signal)
-    tokio::signal::ctrl_c()
-        .await
-        .context("Failed to listen for ctrl-c")?;
-    tracing::info!("Shutting down");
-    ct.cancel();
-
+        .with_context(|| format!("Failed to fetch transcript for {url}"))?;
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(result.text.as_bytes())?;
+    stdout.write_all(b"\n")?;
     Ok(())
 }

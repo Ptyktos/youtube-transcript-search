@@ -12,10 +12,14 @@
 
 - **Single tool**: `get_transcript(url, language?)` — works with any YouTube
   URL format.
+- **Three ways to call it**:
+  - **MCP** over stdio (native) or JSON-RPC over HTTP / SSE (native + Worker)
+  - **Raw HTTP**: `GET /transcript?url=…&language=…` returns plain text — curl-friendly
+  - **CLI one-shot**: `youtube-transcript-mcp --url <URL>` prints to stdout and exits
 - **Native binary**: stdio transport for Claude Desktop / local clients, plus
-  HTTP+SSE transport for remote clients.
-- **WASM Worker**: deploy the same Rust code to Cloudflare Workers as
-  WebAssembly. JSON-RPC over `/mcp` and SSE over `/sse`.
+  an HTTP server with `/transcript`, `/mcp`, and `/sse`.
+- **WASM Worker**: same Rust code, deployed to Cloudflare Workers. Exposes the
+  same `/transcript`, `/mcp`, `/sse` endpoints.
 - **Whisper fallback** (native only): when a video has no captions and
   `WHISPER_URL` is set, the server downloads the audio stream and transcribes
   it via a [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)
@@ -39,6 +43,34 @@ crates/
 Worker. The Worker crate declares its own `[workspace]` so wrangler can build
 it for `wasm32-unknown-unknown` without affecting the host workspace.
 
+## Benchmarks
+
+Measured on a single Linux x86_64 VM (Intel Xeon 8-core, AVX-512), apples-to-apples
+through the same MCP-stdio harness, against the same canned Innertube + 80 KiB
+caption XML fixtures. Full methodology, raw numbers and reproducibility scripts
+in [BENCHMARKS.md](BENCHMARKS.md).
+
+|                                     | this repo (Rust) | TS port (Node)¹ | jdepoix (Python lib)¹ | nabid-pf (Node) | anaisbetts (Node + yt-dlp)² | spinalshock (Go + yt-dlp)³ |
+|-------------------------------------|---:|---:|---:|---:|---:|---:|
+| **LAN p50 latency**                 | **1.86 ms** | 6.44 ms | 7.11 ms | 6.63 ms | 6.96 ms | 2821 ms |
+| **LAN throughput (req/s)**          | **478** | 123 | 135 | 108 | 133 | 0.4 |
+| **PROD-sim p50** (80 ms RTT)        | **164 ms** | — | — | 170 ms | 505 ms | ~2900 ms |
+| **Cold start**                      | **9 ms** (2.6 ms raw) | 89 ms | 11 ms | 337 ms | 141 ms | 2510 ms |
+| **Peak RSS**                        | **5.5 MiB** | 111 MiB | 30 MiB | 117 MiB | 73 MiB | 13 MiB |
+| **Deployable artifact**             | **3.3 MiB binary** | 25 MiB node_modules | pip + Python | 25 MiB node_modules | npm + yt-dlp | Go binary + yt-dlp |
+| **Runtime needed**                  | **none** | Node 18+ | Python 3.x | Node 18+ | Node + yt-dlp | Go binary + yt-dlp |
+
+¹ Algorithm-equivalent reference, not an actual MCP server. Numbers from `bench/run_v2.py`.
+² Measured with a fake yt-dlp shim returning canned subtitles instantly (best case for the wrapping MCP server). The PROD-sim row uses a realistic yt-dlp simulator with Python's ~240 ms startup tax + 3× RTT.
+³ Spinalshock ships a `randomSleep(1500, 3000)` ms rate-limit before every request, which dominates every per-request number regardless of network or yt-dlp speed.
+
+**Headline:** ~3.5× faster than other in-process implementations on CPU-bound work,
+~270× faster than yt-dlp-based servers in production, ~13–20× less memory.
+
+XML parsing alone is **19–20× faster** than `fast-xml-parser` (Node) and
+`defusedxml` (Python) on the same 80 KiB transcript — `quick-xml` streams at
+~409 MiB/s end-to-end vs ~21 MiB/s for either alternative.
+
 ## Self-hosting (native binary)
 
 ### From source
@@ -53,18 +85,31 @@ cargo build --release -p youtube-transcript-mcp
 ### Run
 
 ```bash
-# stdio (Claude Desktop, local MCP clients)
+# One-shot CLI — print transcript to stdout and exit
+./target/release/youtube-transcript-mcp --url 'https://youtu.be/dQw4w9WgXcQ'
+./target/release/youtube-transcript-mcp --url '…' --language es
+
+# stdio MCP (Claude Desktop, local MCP clients)
 ./target/release/youtube-transcript-mcp --stdio
 
-# HTTP + SSE (remote clients) — defaults to 127.0.0.1:3000
+# HTTP server (raw API + MCP) — defaults to 127.0.0.1:3000
 ./target/release/youtube-transcript-mcp
 ./target/release/youtube-transcript-mcp --host 0.0.0.0 --port 8080
 ```
 
-Endpoints (HTTP/SSE mode):
+HTTP endpoints:
 
-- `GET /sse` — SSE stream for the MCP transport
-- `POST /message` — JSON-RPC messages
+| Method | Path                                     | Purpose                                                   |
+|--------|------------------------------------------|-----------------------------------------------------------|
+| GET    | `/`                                      | Server info JSON                                          |
+| GET    | `/transcript?url=…&language=…`           | Raw transcript as `text/plain`                            |
+| POST   | `/mcp`                                   | MCP JSON-RPC (Streamable HTTP)                            |
+| GET    | `/sse`                                   | SSE handshake                                             |
+| POST   | `/sse`                                   | MCP JSON-RPC over SSE (single-shot)                       |
+
+```bash
+curl 'http://127.0.0.1:3000/transcript?url=https://youtu.be/dQw4w9WgXcQ&language=en'
+```
 
 ### Claude Desktop (stdio)
 
@@ -116,25 +161,37 @@ wrangler deploy
 
 `wrangler dev` runs the Worker locally on `http://127.0.0.1:8787`.
 
-The Worker exposes:
+The Worker exposes the same endpoints as the native HTTP server:
 
 - `GET /` — server info JSON
-- `POST /mcp` — JSON-RPC (single-shot HTTP)
-- `GET /sse` and `POST /sse` — JSON-RPC over Server-Sent Events
+- `GET /transcript?url=…&language=…` — raw transcript as `text/plain`
+- `POST /mcp` — MCP JSON-RPC (Streamable HTTP)
+- `GET /sse` / `POST /sse` — MCP JSON-RPC over Server-Sent Events
+
+```bash
+curl 'https://your-worker.workers.dev/transcript?url=https://youtu.be/dQw4w9WgXcQ'
+```
 
 The `[build]` section of `crates/worker/wrangler.toml` runs
 `cargo install -q worker-build && worker-build --release` automatically.
 
-## Tool reference
+## API reference
 
-### `get_transcript`
+### `GET /transcript` (raw)
 
-| Param      | Type     | Required | Description                                                      |
-|------------|----------|----------|------------------------------------------------------------------|
-| `url`      | string   | yes      | YouTube video URL in any supported format.                       |
-| `language` | string   | no       | BCP-47 code (`en`, `es`, …). Defaults to `auto`.                 |
+| Param      | In    | Required | Description                                              |
+|------------|-------|----------|----------------------------------------------------------|
+| `url`      | query | yes      | YouTube video URL in any supported format.               |
+| `language` | query | no       | BCP-47 code (`en`, `es`, …). Defaults to `auto`.         |
 
-**Direct call against the Worker / HTTP server:**
+Responds with `text/plain` on success. Status codes: `200`, `400` (invalid URL),
+`404` (no transcript / unavailable language), `502` (network), `500` (parse).
+
+### MCP tool `get_transcript`
+
+Same parameters, returned as MCP tool content (`{"content":[{"type":"text", …}]}`).
+
+**Direct MCP call against the Worker / HTTP server:**
 
 ```bash
 curl -X POST https://your-worker.workers.dev/mcp \
