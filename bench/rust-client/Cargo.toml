@@ -1,0 +1,17 @@
+[package]
+name = "rust-bench-client"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+youtube-transcript-mcp-core = { path = "/home/user/youtube-transcript-mcp-rust/crates/core" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "time", "io-std", "io-util"] }
+anyhow = "1"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

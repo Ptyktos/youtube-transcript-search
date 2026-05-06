@@ -43,6 +43,34 @@ crates/
 Worker. The Worker crate declares its own `[workspace]` so wrangler can build
 it for `wasm32-unknown-unknown` without affecting the host workspace.
 
+## Benchmarks
+
+Measured on a single Linux x86_64 VM (Intel Xeon 8-core, AVX-512), apples-to-apples
+through the same MCP-stdio harness, against the same canned Innertube + 80 KiB
+caption XML fixtures. Full methodology, raw numbers and reproducibility scripts
+in [BENCHMARKS.md](BENCHMARKS.md).
+
+|                                     | this repo (Rust) | TS port (Node)¹ | jdepoix (Python lib)¹ | nabid-pf (Node) | anaisbetts (Node + yt-dlp)² | spinalshock (Go + yt-dlp)³ |
+|-------------------------------------|---:|---:|---:|---:|---:|---:|
+| **LAN p50 latency**                 | **1.86 ms** | 6.44 ms | 7.11 ms | 6.63 ms | 6.96 ms | 2821 ms |
+| **LAN throughput (req/s)**          | **478** | 123 | 135 | 108 | 133 | 0.4 |
+| **PROD-sim p50** (80 ms RTT)        | **164 ms** | — | — | 170 ms | 505 ms | ~2900 ms |
+| **Cold start**                      | **9 ms** (2.6 ms raw) | 89 ms | 11 ms | 337 ms | 141 ms | 2510 ms |
+| **Peak RSS**                        | **5.5 MiB** | 111 MiB | 30 MiB | 117 MiB | 73 MiB | 13 MiB |
+| **Deployable artifact**             | **3.3 MiB binary** | 25 MiB node_modules | pip + Python | 25 MiB node_modules | npm + yt-dlp | Go binary + yt-dlp |
+| **Runtime needed**                  | **none** | Node 18+ | Python 3.x | Node 18+ | Node + yt-dlp | Go binary + yt-dlp |
+
+¹ Algorithm-equivalent reference, not an actual MCP server. Numbers from `bench/run_v2.py`.
+² Measured with a fake yt-dlp shim returning canned subtitles instantly (best case for the wrapping MCP server). The PROD-sim row uses a realistic yt-dlp simulator with Python's ~240 ms startup tax + 3× RTT.
+³ Spinalshock ships a `randomSleep(1500, 3000)` ms rate-limit before every request, which dominates every per-request number regardless of network or yt-dlp speed.
+
+**Headline:** ~3.5× faster than other in-process implementations on CPU-bound work,
+~270× faster than yt-dlp-based servers in production, ~13–20× less memory.
+
+XML parsing alone is **19–20× faster** than `fast-xml-parser` (Node) and
+`defusedxml` (Python) on the same 80 KiB transcript — `quick-xml` streams at
+~409 MiB/s end-to-end vs ~21 MiB/s for either alternative.
+
 ## Self-hosting (native binary)
 
 ### From source
