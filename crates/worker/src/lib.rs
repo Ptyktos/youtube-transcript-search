@@ -68,6 +68,48 @@ fn json_response(body: &impl Serialize) -> Result<Response> {
     Ok(resp)
 }
 
+fn text_response(status: u16, body: String) -> Result<Response> {
+    let mut resp = Response::from_body(ResponseBody::Body(body.into_bytes()))?.with_status(status);
+    let headers = resp.headers_mut();
+    headers.set("Content-Type", "text/plain; charset=utf-8")?;
+    headers.set("Access-Control-Allow-Origin", "*")?;
+    Ok(resp)
+}
+
+fn transcript_status(e: &TranscriptError) -> u16 {
+    match e {
+        TranscriptError::InvalidUrl | TranscriptError::InvalidVideoId => 400,
+        TranscriptError::NoTranscriptAvailable | TranscriptError::LanguageNotAvailable { .. } => {
+            404
+        }
+        TranscriptError::Network(_) => 502,
+        TranscriptError::Parse(_) => 500,
+    }
+}
+
+async fn transcript_response(req: &Request) -> Result<Response> {
+    let url = req.url()?;
+    let mut video_url: Option<String> = None;
+    let mut language: Option<String> = None;
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "url" => video_url = Some(v.into_owned()),
+            "language" | "lang" => language = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    let Some(video_url) = video_url else {
+        return text_response(400, "Missing required query parameter: url".into());
+    };
+    let language = language.unwrap_or_else(|| "auto".into());
+
+    let args = serde_json::json!({ "url": video_url, "language": language });
+    match handle_get_transcript(&args).await {
+        Ok(text) => text_response(200, text),
+        Err(e) => text_response(transcript_status(&e), e.to_string()),
+    }
+}
+
 fn sse_response(body: &impl Serialize) -> Result<Response> {
     let json = serde_json::to_string(body).map_err(|e| Error::RustError(e.to_string()))?;
     let data = format!("data: {json}\n\n");
@@ -280,9 +322,15 @@ pub async fn main(mut req: Request, _env: Env, _ctx: Context) -> Result<Response
             "name": "youtube-transcript-mcp",
             "version": env!("CARGO_PKG_VERSION"),
             "description": "Remote MCP server for YouTube video transcripts",
-            "endpoints": { "sse": "/sse", "mcp": "/mcp" },
+            "endpoints": {
+                "transcript": "GET /transcript?url=...&language=...",
+                "mcp": "POST /mcp",
+                "sse": "GET|POST /sse"
+            },
             "tools": ["get_transcript"]
         })),
+
+        (Method::Get, "/transcript") => transcript_response(&req).await,
 
         (Method::Post, "/mcp") => {
             let rpc: RpcRequest = req

@@ -12,10 +12,14 @@
 
 - **Single tool**: `get_transcript(url, language?)` — works with any YouTube
   URL format.
+- **Three ways to call it**:
+  - **MCP** over stdio (native) or JSON-RPC over HTTP / SSE (native + Worker)
+  - **Raw HTTP**: `GET /transcript?url=…&language=…` returns plain text — curl-friendly
+  - **CLI one-shot**: `youtube-transcript-mcp --url <URL>` prints to stdout and exits
 - **Native binary**: stdio transport for Claude Desktop / local clients, plus
-  HTTP+SSE transport for remote clients.
-- **WASM Worker**: deploy the same Rust code to Cloudflare Workers as
-  WebAssembly. JSON-RPC over `/mcp` and SSE over `/sse`.
+  an HTTP server with `/transcript`, `/mcp`, and `/sse`.
+- **WASM Worker**: same Rust code, deployed to Cloudflare Workers. Exposes the
+  same `/transcript`, `/mcp`, `/sse` endpoints.
 - **Whisper fallback** (native only): when a video has no captions and
   `WHISPER_URL` is set, the server downloads the audio stream and transcribes
   it via a [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)
@@ -53,18 +57,31 @@ cargo build --release -p youtube-transcript-mcp
 ### Run
 
 ```bash
-# stdio (Claude Desktop, local MCP clients)
+# One-shot CLI — print transcript to stdout and exit
+./target/release/youtube-transcript-mcp --url 'https://youtu.be/dQw4w9WgXcQ'
+./target/release/youtube-transcript-mcp --url '…' --language es
+
+# stdio MCP (Claude Desktop, local MCP clients)
 ./target/release/youtube-transcript-mcp --stdio
 
-# HTTP + SSE (remote clients) — defaults to 127.0.0.1:3000
+# HTTP server (raw API + MCP) — defaults to 127.0.0.1:3000
 ./target/release/youtube-transcript-mcp
 ./target/release/youtube-transcript-mcp --host 0.0.0.0 --port 8080
 ```
 
-Endpoints (HTTP/SSE mode):
+HTTP endpoints:
 
-- `GET /sse` — SSE stream for the MCP transport
-- `POST /message` — JSON-RPC messages
+| Method | Path                                     | Purpose                                                   |
+|--------|------------------------------------------|-----------------------------------------------------------|
+| GET    | `/`                                      | Server info JSON                                          |
+| GET    | `/transcript?url=…&language=…`           | Raw transcript as `text/plain`                            |
+| POST   | `/mcp`                                   | MCP JSON-RPC (Streamable HTTP)                            |
+| GET    | `/sse`                                   | SSE handshake                                             |
+| POST   | `/sse`                                   | MCP JSON-RPC over SSE (single-shot)                       |
+
+```bash
+curl 'http://127.0.0.1:3000/transcript?url=https://youtu.be/dQw4w9WgXcQ&language=en'
+```
 
 ### Claude Desktop (stdio)
 
@@ -116,25 +133,37 @@ wrangler deploy
 
 `wrangler dev` runs the Worker locally on `http://127.0.0.1:8787`.
 
-The Worker exposes:
+The Worker exposes the same endpoints as the native HTTP server:
 
 - `GET /` — server info JSON
-- `POST /mcp` — JSON-RPC (single-shot HTTP)
-- `GET /sse` and `POST /sse` — JSON-RPC over Server-Sent Events
+- `GET /transcript?url=…&language=…` — raw transcript as `text/plain`
+- `POST /mcp` — MCP JSON-RPC (Streamable HTTP)
+- `GET /sse` / `POST /sse` — MCP JSON-RPC over Server-Sent Events
+
+```bash
+curl 'https://your-worker.workers.dev/transcript?url=https://youtu.be/dQw4w9WgXcQ'
+```
 
 The `[build]` section of `crates/worker/wrangler.toml` runs
 `cargo install -q worker-build && worker-build --release` automatically.
 
-## Tool reference
+## API reference
 
-### `get_transcript`
+### `GET /transcript` (raw)
 
-| Param      | Type     | Required | Description                                                      |
-|------------|----------|----------|------------------------------------------------------------------|
-| `url`      | string   | yes      | YouTube video URL in any supported format.                       |
-| `language` | string   | no       | BCP-47 code (`en`, `es`, …). Defaults to `auto`.                 |
+| Param      | In    | Required | Description                                              |
+|------------|-------|----------|----------------------------------------------------------|
+| `url`      | query | yes      | YouTube video URL in any supported format.               |
+| `language` | query | no       | BCP-47 code (`en`, `es`, …). Defaults to `auto`.         |
 
-**Direct call against the Worker / HTTP server:**
+Responds with `text/plain` on success. Status codes: `200`, `400` (invalid URL),
+`404` (no transcript / unavailable language), `502` (network), `500` (parse).
+
+### MCP tool `get_transcript`
+
+Same parameters, returned as MCP tool content (`{"content":[{"type":"text", …}]}`).
+
+**Direct MCP call against the Worker / HTTP server:**
 
 ```bash
 curl -X POST https://your-worker.workers.dev/mcp \
