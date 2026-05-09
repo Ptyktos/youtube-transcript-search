@@ -21,6 +21,7 @@ pub fn build_client() -> anyhow::Result<Client> {
 async fn get_text(client: &Client, url: &str) -> Result<String, TranscriptError> {
     client
         .get(url)
+        .header("User-Agent", USER_AGENT)
         .send()
         .await
         .map_err(|e| TranscriptError::Network(format!("GET {url}: {e}")))?
