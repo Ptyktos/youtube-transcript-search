@@ -10,13 +10,11 @@
 
 ## 🌟 Features
 
-- **Zero Local Setup**: No installation required - works directly from the cloud
-- **Universal Access**: Works on desktop, mobile, and web versions of Claude
-- **Smart Caching**: Efficient caching system using Cloudflare KV for fast responses
-- **Multi-language Support**: Extract transcripts in different languages
-- **Error Handling**: Robust error handling with user-friendly messages
-- **Analytics**: Built-in request tracking and usage analytics
-- **URL Flexibility**: Handles all YouTube URL formats (youtube.com, youtu.be, m.youtube.com, etc.)
+- **Two deployment targets**: Native binary (stdio + HTTP/SSE for local MCP clients) and Cloudflare Worker (remote MCP)
+- **Multi-language Support**: BCP-47 language selection with automatic fallback to the first available track
+- **URL Flexibility**: Handles every documented YouTube URL form (`watch`, `youtu.be`, `shorts`, `live`, `embed`, mobile, international TLDs); tracking parameters stripped automatically
+- **Whisper fallback** *(native only)*: When `WHISPER_URL` is set, videos with no captions fall back to a faster-whisper-server instance
+- **Linear-time XML parser**: ~150–200 MB/s on real caption tracks (see [Performance](#-performance))
 
 ## 🚀 Quick Start
 
@@ -178,11 +176,55 @@ To force HTTP transport instead of SSE:
 
 ## 📊 Server Information
 
-- **Hosting**: Cloudflare Workers
-- **Caching**: Cloudflare KV with 7-day cache for successful transcripts
-- **Rate Limiting**: Built-in retry logic with exponential backoff
-- **Uptime**: 99.9%+ availability through Cloudflare's global network
-- **Response Time**: Typically <3 seconds for cached content, <10 seconds for new requests
+- **Hosting**: Cloudflare Workers (worker crate) or self-hosted (native crate)
+- **Uptime**: Inherits the underlying platform's availability — Cloudflare's global network for the worker, your host for the native binary
+- **Response Time**: Measured 1.4–2.0 s end-to-end for cold requests across short and long-form videos (see [Performance](#-performance) for the methodology and raw numbers)
+
+> ⚠️ **Known gaps relative to the upstream TypeScript project**
+>
+> The Rust rewrite does **not yet** implement the following features the upstream README advertised:
+>
+> - **No KV caching.** Every request re-fetches Innertube + caption XML from YouTube. The worker also sends `Cache-Control: no-cache` on its responses.
+> - **No retry / exponential backoff.** First network failure propagates to the caller. The recommended client-side workaround is to retry idempotent calls with a small delay.
+> - **No analytics / request tracking.**
+>
+> These are tracked as future work; if you need them today, deploy the upstream TypeScript implementation instead.
+
+## 📈 Performance
+
+Numbers below were measured on the native binary (release, x86_64, residential link) against live YouTube on 2026-05-09. Each video was hit five times with a fresh `reqwest::Client` per call to defeat connection-pool reuse — i.e. every measurement is a true cold path.
+
+| Video | Length | Caption XML | Output | Total p50 |
+|---|---|---|---|---|
+| `dQw4w9WgXcQ` (Rick Astley) | 3 m 33 s | 4 KB | 2,335 ch | 1.36 s |
+| `fNk_zzaMoSs` (3Blue1Brown) | ~10 m | 14 KB | 10,174 ch | 1.56 s |
+| `-QFHIoCo-Ko` (Pocock talk) | 1 h 26 m | 550 KB | 89,753 ch | 1.82 s |
+| `kCc8FmEb1nY` (Karpathy GPT) | 2 h+ | 785 KB | 108,990 ch | 1.76 s |
+
+Stage breakdown (median across all runs):
+
+- **Innertube POST**: ~1.0–1.4 s — dominated by the YouTube round-trip
+- **Caption XML GET**: 0.2–0.9 s — scales with body size
+- **XML → text parse**: ≤ 4 ms even for the 785 KB lecture
+
+### Parser microbenchmarks
+
+`crates/core` ships a Criterion benchmark that exercises `parse_transcript_xml` across synthetic srv3 inputs. To run it:
+
+```bash
+cargo bench -p youtube-transcript-mcp-core --bench parser
+```
+
+Representative throughput on the same hardware:
+
+| Input | Time | Throughput |
+|---|---|---|
+| 14 KB | ~75 µs | ~185 MB/s |
+| 150 KB | ~1.2 ms | ~120 MB/s |
+| 1.5 MB | ~7.5 ms | ~200 MB/s |
+| 8 MB | ~45 ms | ~170 MB/s |
+
+The parser is linear in input size; its cost is well under the network round-trip for any caption track YouTube actually serves.
 
 ## 🚨 Error Handling
 
@@ -191,7 +233,7 @@ The server provides clear error messages for common issues:
 - **"Invalid YouTube URL provided"**: The URL format is not recognized
 - **"No transcript available for this video"**: Video has no captions/transcript
 - **"Video not found or private"**: Video is private, deleted, or doesn't exist
-- **"Service temporarily busy, try again in a few minutes"**: Rate limiting from YouTube
+- **"Network error: ..."**: Transient YouTube failure or transport error. The server does not retry — clients should retry idempotent calls with their own backoff.
 - **"Transcripts are disabled for this video"**: Creator has disabled captions
 
 ## 🌍 Language Support
@@ -211,9 +253,9 @@ The server supports any language that YouTube provides transcripts for. Common l
 
 ## 🔒 Privacy & Security
 
-- **No Authentication Required**: Public server for ease of use
-- **No Data Storage**: Transcripts are cached temporarily for performance only
-- **No Personal Information**: Only YouTube video IDs and transcripts are processed
+- **No Authentication Required**: Public server for ease of use (configure your own auth in front if needed)
+- **No Data Storage**: The server is stateless — no caching, no persistence; each request re-fetches from YouTube
+- **No Personal Information**: Only YouTube video IDs and transcripts are processed in-memory for the duration of the request
 - **HTTPS Only**: All communications are encrypted
 - **CORS Enabled**: Supports web-based MCP clients
 
