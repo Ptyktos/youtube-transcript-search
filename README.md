@@ -227,7 +227,10 @@ Tracking parameters (`si`, `t`, …) are ignored.
 ```bash
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
-cargo test --workspace
+cargo test --workspace          # core unit tests + native HTTP integration tests (wiremock)
+
+# Parser microbenchmark (Criterion) — see BENCHMARKS.md
+cargo bench -p youtube-transcript-mcp-core --bench parser
 
 # Worker (separate workspace, wasm32 target)
 cargo check -p youtube-transcript-mcp-worker \
@@ -235,8 +238,14 @@ cargo check -p youtube-transcript-mcp-worker \
   --target wasm32-unknown-unknown
 ```
 
-CI runs the same commands on every push. Pre-built native binaries for Linux
-and macOS are attached to GitHub Releases when a `v*` tag is pushed.
+`cargo test --workspace` includes wiremock-backed tests in `crates/native` that
+exercise the full Innertube → caption-XML → parse path against a local mock
+server — including the assertion that both upstream requests carry the
+`User-Agent` header (a missing header there once produced silent empty
+transcripts).
+
+CI runs `fmt`, `clippy`, and `test` on every push. Pre-built native binaries
+for Linux and macOS are attached to GitHub Releases when a `v*` tag is pushed.
 
 ## License
 
