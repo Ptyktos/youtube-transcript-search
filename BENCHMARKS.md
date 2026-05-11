@@ -172,6 +172,24 @@ python3 bench/run_full.py
 
 The harness installs and patches third-party tools at `/tmp/{anaisbetts,nabid,youtube-transcript-mcp}/`. See `bench/README.md` for the exact `pip`/`npm`/`go build` commands.
 
+### Parser microbenchmark (Criterion)
+
+For a fast, dependency-free regression check on the XML parser alone — no
+Python, no third-party installs — there is a Criterion bench in `crates/core`:
+
+```bash
+cargo bench -p youtube-transcript-mcp-core --bench parser
+```
+
+It synthesises srv3-format caption XMLs at four sizes (14 KiB / 150 KiB /
+1.5 MiB / 8 MiB) and reports per-size throughput. Note that the absolute
+numbers run lower than the **409 MiB/s** in the comparison table above: that
+figure is measured against `bench/canned/caption.xml` (flat `<text>` segments,
+the legacy timedtext format), whereas the Criterion inputs use the denser
+nested `<p><s>…</s></p>` srv3 structure, which produces more parser events per
+byte. Both confirm the same thing — parsing is linear in input size and stays
+well under the network round-trip for any caption track YouTube serves.
+
 ## Caveats
 
 - **YouTube is unreachable from the benchmark sandbox**, so the production
