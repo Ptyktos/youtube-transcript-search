@@ -33,6 +33,11 @@ struct Cli {
     #[arg(long, default_value = "auto")]
     language: String,
 
+    /// Output format (with --url): text, json, srt, vtt, or markdown.
+    /// json and markdown include clickable timestamp links.
+    #[arg(long, default_value = "text")]
+    format: String,
+
     /// Host to bind the HTTP server to
     #[arg(long, default_value = "127.0.0.1", env = "HOST")]
     host: String,
@@ -56,7 +61,7 @@ async fn main() -> Result<()> {
     let client = build_client()?;
 
     if let Some(url) = cli.url.as_deref() {
-        return run_oneshot(client, url, &cli.language).await;
+        return run_oneshot(client, url, &cli.language, &cli.format).await;
     }
 
     if cli.stdio {
@@ -78,8 +83,13 @@ async fn main() -> Result<()> {
     http::serve(client, &addr).await
 }
 
-async fn run_oneshot(client: reqwest::Client, url: &str, language: &str) -> Result<()> {
-    let result = get_transcript(&client, url, language)
+async fn run_oneshot(
+    client: reqwest::Client,
+    url: &str,
+    language: &str,
+    format: &str,
+) -> Result<()> {
+    let result = get_transcript(&client, url, language, format)
         .await
         .with_context(|| format!("Failed to fetch transcript for {url}"))?;
     let mut stdout = std::io::stdout().lock();

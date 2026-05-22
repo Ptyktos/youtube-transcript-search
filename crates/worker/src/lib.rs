@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use worker::*;
 use youtube_transcript_mcp_core::{
-    extract_video_id, innertube_body, parse_innertube_response, parse_transcript_xml, select_track,
-    InnertubeData, Language, TranscriptError, INNERTUBE_URL, USER_AGENT,
+    extract_video_id, format_transcript, innertube_body, parse_innertube_response,
+    parse_transcript_segments, select_track, InnertubeData, Language, OutputFormat,
+    TranscriptError, INNERTUBE_URL, USER_AGENT,
 };
 
 // ── JSON-RPC types ────────────────────────────────────────────────────────────
@@ -32,7 +33,12 @@ struct RpcError {
 
 impl RpcResponse {
     fn ok(id: Option<serde_json::Value>, result: serde_json::Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     fn err(id: Option<serde_json::Value>, code: i32, message: impl Into<String>) -> Self {
@@ -40,7 +46,10 @@ impl RpcResponse {
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(RpcError { code, message: message.into() }),
+            error: Some(RpcError {
+                code,
+                message: message.into(),
+            }),
         }
     }
 }
@@ -69,9 +78,13 @@ fn json_response(body: &impl Serialize) -> Result<Response> {
 }
 
 fn text_response(status: u16, body: String) -> Result<Response> {
+    body_response(status, "text/plain; charset=utf-8", body)
+}
+
+fn body_response(status: u16, content_type: &str, body: String) -> Result<Response> {
     let mut resp = Response::from_body(ResponseBody::Body(body.into_bytes()))?.with_status(status);
     let headers = resp.headers_mut();
-    headers.set("Content-Type", "text/plain; charset=utf-8")?;
+    headers.set("Content-Type", content_type)?;
     headers.set("Access-Control-Allow-Origin", "*")?;
     Ok(resp)
 }
@@ -91,10 +104,12 @@ async fn transcript_response(req: &Request) -> Result<Response> {
     let url = req.url()?;
     let mut video_url: Option<String> = None;
     let mut language: Option<String> = None;
+    let mut format: Option<String> = None;
     for (k, v) in url.query_pairs() {
         match k.as_ref() {
             "url" => video_url = Some(v.into_owned()),
             "language" | "lang" => language = Some(v.into_owned()),
+            "format" | "fmt" => format = Some(v.into_owned()),
             _ => {}
         }
     }
@@ -102,10 +117,15 @@ async fn transcript_response(req: &Request) -> Result<Response> {
         return text_response(400, "Missing required query parameter: url".into());
     };
     let language = language.unwrap_or_else(|| "auto".into());
+    let format = format.unwrap_or_else(|| "text".into());
+    let content_type = format
+        .parse::<OutputFormat>()
+        .unwrap_or_default()
+        .content_type();
 
-    let args = serde_json::json!({ "url": video_url, "language": language });
+    let args = serde_json::json!({ "url": video_url, "language": language, "format": format });
     match handle_get_transcript(&args).await {
-        Ok(text) => text_response(200, text),
+        Ok(text) => body_response(200, content_type, text),
         Err(e) => text_response(transcript_status(&e), e.to_string()),
     }
 }
@@ -153,10 +173,12 @@ async fn fetch_text(url: &str) -> std::result::Result<String, TranscriptError> {
         .map_err(|e| TranscriptError::Network(e.to_string()))
 }
 
-async fn fetch_innertube(video_id: &youtube_transcript_mcp_core::VideoId) -> std::result::Result<String, TranscriptError> {
+async fn fetch_innertube(
+    video_id: &youtube_transcript_mcp_core::VideoId,
+) -> std::result::Result<String, TranscriptError> {
     let body = innertube_body(video_id);
-    let body_str = serde_json::to_string(&body)
-        .map_err(|e| TranscriptError::Parse(e.to_string()))?;
+    let body_str =
+        serde_json::to_string(&body).map_err(|e| TranscriptError::Parse(e.to_string()))?;
 
     let mut headers = Headers::new();
     headers
@@ -201,9 +223,11 @@ async fn handle_get_transcript(
         .as_str()
         .ok_or_else(|| TranscriptError::Parse("Missing required parameter: url".into()))?;
     let language_str = args["language"].as_str().unwrap_or("auto");
+    let format_str = args["format"].as_str().unwrap_or("text");
 
     let video_id = extract_video_id(url)?;
     let language: Language = language_str.parse().unwrap_or_default();
+    let format: OutputFormat = format_str.parse().unwrap_or_default();
 
     // Step 1: POST to Innertube
     let innertube_json = fetch_innertube(&video_id).await?;
@@ -217,13 +241,15 @@ async fn handle_get_transcript(
     // Step 4: fetch XML
     let xml = fetch_text(&track.base_url).await?;
 
-    // Step 5: parse to plain text
-    let raw_text = parse_transcript_xml(&xml)?;
-
-    Ok(match fallback_note {
-        Some(note) => format!("[{note}]\n\n{raw_text}"),
-        None => raw_text,
-    })
+    // Step 5: parse to timestamped segments, then render in the requested format
+    let segments = parse_transcript_segments(&xml)?;
+    Ok(format_transcript(
+        &segments,
+        &video_id,
+        &track.language_code,
+        fallback_note.as_deref(),
+        format,
+    ))
 }
 
 // ── MCP dispatcher ─────────────────────────────────────────────────────────────
@@ -248,7 +274,7 @@ async fn dispatch(rpc: RpcRequest) -> RpcResponse {
             serde_json::json!({
                 "tools": [{
                     "name": "get_transcript",
-                    "description": "Extract the full transcript from a YouTube video URL",
+                    "description": "Extract the transcript from a YouTube video URL. Use 'format' for plain text (default), JSON or Markdown (both with clickable timestamp links), or SRT/VTT subtitles.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -259,6 +285,11 @@ async fn dispatch(rpc: RpcRequest) -> RpcResponse {
                             "language": {
                                 "type": "string",
                                 "description": "Language code (e.g. 'en', 'es'). Defaults to 'auto'."
+                            },
+                            "format": {
+                                "type": "string",
+                                "enum": ["text", "json", "srt", "vtt", "markdown"],
+                                "description": "Output format. 'json' and 'markdown' embed clickable links to each timestamp. Defaults to 'text'."
                             }
                         },
                         "required": ["url"]
@@ -279,9 +310,7 @@ async fn dispatch(rpc: RpcRequest) -> RpcResponse {
             }
 
             let empty = serde_json::Value::Null;
-            let args = params
-                .and_then(|p| p.get("arguments"))
-                .unwrap_or(&empty);
+            let args = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
 
             match handle_get_transcript(args).await {
                 Ok(text) => RpcResponse::ok(
@@ -323,7 +352,7 @@ pub async fn main(mut req: Request, _env: Env, _ctx: Context) -> Result<Response
             "version": env!("CARGO_PKG_VERSION"),
             "description": "Remote MCP server for YouTube video transcripts",
             "endpoints": {
-                "transcript": "GET /transcript?url=...&language=...",
+                "transcript": "GET /transcript?url=...&language=...&format=...",
                 "mcp": "POST /mcp",
                 "sse": "GET|POST /sse"
             },

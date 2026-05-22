@@ -1,9 +1,9 @@
 use anyhow::Context as _;
 use reqwest::Client;
 use youtube_transcript_mcp_core::{
-    extract_video_id, innertube_body, parse_innertube_response, parse_transcript_xml, select_track,
-    AudioStream, InnertubeData, Language, TranscriptError, TranscriptResult, INNERTUBE_URL,
-    USER_AGENT,
+    extract_video_id, format_transcript, innertube_body, parse_innertube_response,
+    parse_transcript_segments, select_track, AudioStream, InnertubeData, Language, OutputFormat,
+    TranscriptError, TranscriptResult, INNERTUBE_URL, USER_AGENT,
 };
 
 /// Build a shared reqwest [`Client`] with sensible timeouts.
@@ -102,6 +102,8 @@ async fn whisper_transcribe(
 /// Fetch the transcript for a `YouTube` URL with language selection and fallback.
 ///
 /// `language_str` accepts `"auto"` (default) or any BCP-47 language code.
+/// `format_str` selects the output rendering (`text`, `json`, `srt`, `vtt`,
+/// `markdown`); unknown values fall back to `text`.
 ///
 /// When no caption tracks are available and the `WHISPER_URL` environment variable is set,
 /// falls back to Whisper ASR transcription via a faster-whisper-server instance.
@@ -113,8 +115,9 @@ pub async fn get_transcript(
     client: &Client,
     url: &str,
     language_str: &str,
+    format_str: &str,
 ) -> Result<TranscriptResult, TranscriptError> {
-    get_transcript_via(client, INNERTUBE_URL, url, language_str).await
+    get_transcript_via(client, INNERTUBE_URL, url, language_str, format_str).await
 }
 
 /// Like [`get_transcript`] but with an injectable Innertube endpoint, for testing.
@@ -123,9 +126,11 @@ async fn get_transcript_via(
     innertube_url: &str,
     url: &str,
     language_str: &str,
+    format_str: &str,
 ) -> Result<TranscriptResult, TranscriptError> {
     let video_id = extract_video_id(url)?;
     let language: Language = language_str.parse().unwrap_or_default();
+    let format: OutputFormat = format_str.parse().unwrap_or_default();
 
     // Step 1: POST to Innertube
     let body = innertube_body(&video_id);
@@ -171,13 +176,15 @@ async fn get_transcript_via(
     // Step 5: fetch XML
     let xml = get_text(client, &track.base_url).await?;
 
-    // Step 6: parse to plain text
-    let raw_text = parse_transcript_xml(&xml)?;
-
-    let text = match fallback_note {
-        Some(note) => format!("[{note}]\n\n{raw_text}"),
-        None => raw_text,
-    };
+    // Step 6: parse to timestamped segments, then render in the requested format
+    let segments = parse_transcript_segments(&xml)?;
+    let text = format_transcript(
+        &segments,
+        &video_id,
+        &track.language_code,
+        fallback_note.as_deref(),
+        format,
+    );
 
     Ok(TranscriptResult {
         text,
@@ -278,11 +285,50 @@ mod tests {
             &innertube_url,
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             "auto",
+            "text",
         )
         .await
         .expect("full pipeline should succeed");
 
         assert_eq!(result.language, "en");
         assert_eq!(result.text, "Hello world This is a test");
+    }
+
+    /// The `format` argument must thread through to the rendered output: markdown
+    /// should carry clickable `&t=` deep links built from the cue timings.
+    #[tokio::test]
+    async fn markdown_format_produces_clickable_links() {
+        let server = MockServer::start().await;
+        let caption_url = format!("{}/caption", server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/youtubei/v1/player"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(innertube_ok(&caption_url)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/caption"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(CAPTION_XML))
+            .mount(&server)
+            .await;
+
+        let client = build_client().expect("client");
+        let innertube_url = format!("{}/youtubei/v1/player", server.uri());
+        let result = get_transcript_via(
+            &client,
+            &innertube_url,
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "auto",
+            "markdown",
+        )
+        .await
+        .expect("full pipeline should succeed");
+
+        assert!(result
+            .text
+            .contains("- [0:00](https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=0s) Hello world"));
+        assert!(result
+            .text
+            .contains("- [0:01](https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1s) This is a test"));
     }
 }

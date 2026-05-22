@@ -10,8 +10,8 @@
 
 ## Features
 
-- **Single tool**: `get_transcript(url, language?)` — works with any YouTube
-  URL format.
+- **Single tool**: `get_transcript(url, language?, format?)` — works with any
+  YouTube URL format.
 - **Three ways to call it**:
   - **MCP** over stdio (native) or JSON-RPC over HTTP / SSE (native + Worker)
   - **Raw HTTP**: `GET /transcript?url=…&language=…` returns plain text — curl-friendly
@@ -29,6 +29,10 @@
 - **Language selection**: BCP-47 codes (`en`, `es`, `fr`, …) or `auto` (default).
   Falls back to English with an explanatory note when the requested language
   is unavailable.
+- **Output formats**: `text` (default), `json`, `srt`, `vtt`, or `markdown`.
+  `json` and `markdown` embed a clickable deep link (`watch?v=…&t=<secs>s`) for
+  every cue, so you can open the file and jump straight to that moment in the
+  video; `srt`/`vtt` are standard subtitle files.
 
 ## Repository layout
 
@@ -88,6 +92,8 @@ cargo build --release -p youtube-transcript-mcp
 # One-shot CLI — print transcript to stdout and exit
 ./target/release/youtube-transcript-mcp --url 'https://youtu.be/dQw4w9WgXcQ'
 ./target/release/youtube-transcript-mcp --url '…' --language es
+# Markdown with clickable timestamp links (also: json, srt, vtt)
+./target/release/youtube-transcript-mcp --url '…' --format markdown
 
 # stdio MCP (Claude Desktop, local MCP clients)
 ./target/release/youtube-transcript-mcp --stdio
@@ -102,13 +108,15 @@ HTTP endpoints:
 | Method | Path                                     | Purpose                                                   |
 |--------|------------------------------------------|-----------------------------------------------------------|
 | GET    | `/`                                      | Server info JSON                                          |
-| GET    | `/transcript?url=…&language=…`           | Raw transcript as `text/plain`                            |
+| GET    | `/transcript?url=…&language=…&format=…`  | Transcript in the requested `format` (defaults to `text`) |
 | POST   | `/mcp`                                   | MCP JSON-RPC (Streamable HTTP)                            |
 | GET    | `/sse`                                   | SSE handshake                                             |
 | POST   | `/sse`                                   | MCP JSON-RPC over SSE (single-shot)                       |
 
 ```bash
 curl 'http://127.0.0.1:3000/transcript?url=https://youtu.be/dQw4w9WgXcQ&language=en'
+# Markdown with clickable timestamp links
+curl 'http://127.0.0.1:3000/transcript?url=https://youtu.be/dQw4w9WgXcQ&format=markdown'
 ```
 
 ### Claude Desktop (stdio)
@@ -137,7 +145,8 @@ WHISPER_URL=http://localhost:8000 ./target/release/youtube-transcript-mcp --stdi
 ```
 
 The transcript is prefixed with `[AI-generated transcript — no captions
-available]`.
+available]`. ASR output has no per-cue timestamps, so this path always returns
+plain text regardless of the requested `format`.
 
 ## Cloudflare Workers (WASM)
 
@@ -164,7 +173,7 @@ wrangler deploy
 The Worker exposes the same endpoints as the native HTTP server:
 
 - `GET /` — server info JSON
-- `GET /transcript?url=…&language=…` — raw transcript as `text/plain`
+- `GET /transcript?url=…&language=…&format=…` — transcript in the requested `format`
 - `POST /mcp` — MCP JSON-RPC (Streamable HTTP)
 - `GET /sse` / `POST /sse` — MCP JSON-RPC over Server-Sent Events
 
@@ -183,13 +192,18 @@ The `[build]` section of `crates/worker/wrangler.toml` runs
 |------------|-------|----------|----------------------------------------------------------|
 | `url`      | query | yes      | YouTube video URL in any supported format.               |
 | `language` | query | no       | BCP-47 code (`en`, `es`, …). Defaults to `auto`.         |
+| `format`   | query | no       | `text` (default), `json`, `srt`, `vtt`, or `markdown`.   |
 
-Responds with `text/plain` on success. Status codes: `200`, `400` (invalid URL),
-`404` (no transcript / unavailable language), `502` (network), `500` (parse).
+Responds with the body in the requested `format` (`Content-Type` is set
+accordingly: `text/plain`, `application/json`, `text/vtt`, or `text/markdown`).
+`json` and `markdown` include a `watch?v=…&t=<secs>s` deep link per cue. Status
+codes: `200`, `400` (invalid URL), `404` (no transcript / unavailable language),
+`502` (network), `500` (parse).
 
 ### MCP tool `get_transcript`
 
-Same parameters, returned as MCP tool content (`{"content":[{"type":"text", …}]}`).
+Same parameters (`url`, `language`, `format`), returned as MCP tool content
+(`{"content":[{"type":"text", …}]}`).
 
 **Direct MCP call against the Worker / HTTP server:**
 
