@@ -1,7 +1,7 @@
 use crate::error::TranscriptError;
 use crate::language::{Language, AUTO_DETECT_ORDER};
 use crate::url::VideoId;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use serde::Deserialize;
 
@@ -48,6 +48,17 @@ pub struct TranscriptResult {
     pub text: String,
     /// The language code that was actually used.
     pub language: String,
+}
+
+/// A single timestamped transcript cue.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Segment {
+    /// Start offset from the beginning of the video, in seconds.
+    pub start: f64,
+    /// Duration of the cue, in seconds.
+    pub dur: f64,
+    /// Caption text for this cue.
+    pub text: String,
 }
 
 /// The best available audio-only stream for a video, used as Whisper input.
@@ -218,19 +229,50 @@ pub fn select_track<'a>(
     }
 }
 
-/// Parse a `YouTube` transcript XML response into a single plain-text string.
+/// Read the start/duration of a cue element, in seconds.
 ///
-/// Handles both `<text>` elements (legacy format) and `<p>` elements (Innertube format).
-/// XML entities (`&amp;`, `&lt;`, etc.) are unescaped automatically by `quick-xml`.
+/// Handles both the legacy `<text start="1.5" dur="2">` form (seconds) and the
+/// Innertube srv3 `<p t="1500" d="2000">` form (milliseconds). Seconds-based
+/// attributes win when both are present.
+fn cue_timing(e: &BytesStart) -> (f64, f64) {
+    let (mut start_s, mut dur_s, mut t_ms, mut d_ms) = (None, None, None, None);
+    for attr in e.attributes().flatten() {
+        let Some(v) = std::str::from_utf8(&attr.value)
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+        else {
+            continue;
+        };
+        match attr.key.as_ref() {
+            b"start" => start_s = Some(v),
+            b"dur" => dur_s = Some(v),
+            b"t" => t_ms = Some(v),
+            b"d" => d_ms = Some(v),
+            _ => {}
+        }
+    }
+    let start = start_s.or_else(|| t_ms.map(|m| m / 1000.0)).unwrap_or(0.0);
+    let dur = dur_s.or_else(|| d_ms.map(|m| m / 1000.0)).unwrap_or(0.0);
+    (start, dur)
+}
+
+/// Parse a `YouTube` transcript XML response into timestamped [`Segment`]s.
+///
+/// Handles both `<text>` elements (legacy format) and `<p>`/`<s>` elements
+/// (Innertube srv3 format); text from nested `<s>` runs is merged into its
+/// parent cue. XML entities (`&amp;`, `&lt;`, etc.) are unescaped automatically
+/// by `quick-xml`. Cues with no text are skipped.
 ///
 /// # Errors
 /// Returns `TranscriptError::Parse` if the XML is malformed.
-pub fn parse_transcript_xml(xml: &str) -> Result<String, TranscriptError> {
+pub fn parse_transcript_segments(xml: &str) -> Result<Vec<Segment>, TranscriptError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
-    let mut texts: Vec<String> = Vec::new();
-    let mut in_text_element = false;
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut in_cue = false;
+    let (mut cur_start, mut cur_dur) = (0.0, 0.0);
+    let mut cur_text: Vec<String> = Vec::new();
     let mut buf = Vec::new();
 
     loop {
@@ -238,19 +280,34 @@ pub fn parse_transcript_xml(xml: &str) -> Result<String, TranscriptError> {
             Ok(Event::Start(ref e))
                 if e.name().as_ref() == b"p" || e.name().as_ref() == b"text" =>
             {
-                in_text_element = true;
+                let (start, dur) = cue_timing(e);
+                cur_start = start;
+                cur_dur = dur;
+                cur_text.clear();
+                in_cue = true;
             }
-            Ok(Event::Text(ref e)) if in_text_element => {
+            Ok(Event::Text(ref e)) if in_cue => {
                 let s = e
                     .unescape()
                     .map_err(|e| TranscriptError::Parse(e.to_string()))?;
-                let trimmed = s.trim().to_string();
+                let trimmed = s.trim();
                 if !trimmed.is_empty() {
-                    texts.push(trimmed);
+                    cur_text.push(trimmed.to_string());
                 }
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == b"p" || e.name().as_ref() == b"text" => {
-                in_text_element = false;
+                if in_cue {
+                    let text = cur_text.join(" ");
+                    if !text.is_empty() {
+                        segments.push(Segment {
+                            start: cur_start,
+                            dur: cur_dur,
+                            text,
+                        });
+                    }
+                    cur_text.clear();
+                    in_cue = false;
+                }
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(TranscriptError::Parse(e.to_string())),
@@ -259,7 +316,22 @@ pub fn parse_transcript_xml(xml: &str) -> Result<String, TranscriptError> {
         buf.clear();
     }
 
-    Ok(texts.join(" "))
+    Ok(segments)
+}
+
+/// Parse a `YouTube` transcript XML response into a single plain-text string.
+///
+/// A convenience wrapper over [`parse_transcript_segments`] that joins every
+/// cue with a single space.
+///
+/// # Errors
+/// Returns `TranscriptError::Parse` if the XML is malformed.
+pub fn parse_transcript_xml(xml: &str) -> Result<String, TranscriptError> {
+    Ok(parse_transcript_segments(xml)?
+        .into_iter()
+        .map(|s| s.text)
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 #[cfg(test)]

@@ -22,7 +22,9 @@ impl TranscriptServer {
 #[tool(tool_box)]
 impl TranscriptServer {
     /// Extract the full transcript from a `YouTube` video.
-    #[tool(description = "Extract the full transcript from a YouTube video URL")]
+    #[tool(
+        description = "Extract the transcript from a YouTube video URL. The 'format' argument selects plain text (default), JSON or Markdown (both with clickable timestamp links), or SRT/VTT subtitles."
+    )]
     async fn get_transcript(
         &self,
         #[tool(param)]
@@ -35,9 +37,15 @@ impl TranscriptServer {
             description = "Language code (e.g. 'en', 'es', 'fr'). Omit or use 'auto' for automatic detection."
         )]
         language: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Output format: 'text' (default), 'json', 'srt', 'vtt', or 'markdown'. 'json' and 'markdown' embed clickable links to each timestamp in the video."
+        )]
+        format: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let lang = language.as_deref().unwrap_or("auto");
-        get_transcript(&self.client, &url, lang)
+        let fmt = format.as_deref().unwrap_or("text");
+        get_transcript(&self.client, &url, lang, fmt)
             .await
             .map(|r| CallToolResult::success(vec![Content::text(r.text)]))
             .map_err(|e| match &e {

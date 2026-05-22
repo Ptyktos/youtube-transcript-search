@@ -18,7 +18,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tower_http::cors::{Any, CorsLayer};
-use youtube_transcript_mcp_core::TranscriptError;
+use youtube_transcript_mcp_core::{OutputFormat, TranscriptError};
 
 use crate::fetch::get_transcript;
 
@@ -65,7 +65,7 @@ async fn info() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "endpoints": {
             "info": "GET /",
-            "transcript": "GET /transcript?url=...&language=...",
+            "transcript": "GET /transcript?url=...&language=...&format=...",
             "mcp": "POST /mcp",
             "sse": "GET|POST /sse",
         },
@@ -77,6 +77,7 @@ async fn info() -> Json<serde_json::Value> {
 struct TranscriptQuery {
     url: String,
     language: Option<String>,
+    format: Option<String>,
 }
 
 async fn raw_transcript(
@@ -84,10 +85,15 @@ async fn raw_transcript(
     Query(q): Query<TranscriptQuery>,
 ) -> Response {
     let lang = q.language.as_deref().unwrap_or("auto");
-    match get_transcript(&state.client, &q.url, lang).await {
+    let fmt = q.format.as_deref().unwrap_or("text");
+    let content_type = fmt
+        .parse::<OutputFormat>()
+        .unwrap_or_default()
+        .content_type();
+    match get_transcript(&state.client, &q.url, lang, fmt).await {
         Ok(r) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(header::CONTENT_TYPE, content_type)],
             r.text,
         )
             .into_response(),
@@ -170,12 +176,13 @@ async fn dispatch(state: &AppState, rpc: RpcRequest) -> RpcResponse {
             serde_json::json!({
                 "tools": [{
                     "name": "get_transcript",
-                    "description": "Extract the full transcript from a YouTube video URL",
+                    "description": "Extract the transcript from a YouTube video URL. Use 'format' for plain text (default), JSON or Markdown (both with clickable timestamp links), or SRT/VTT subtitles.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "url": { "type": "string", "description": "YouTube video URL (any format)" },
-                            "language": { "type": "string", "description": "Language code (e.g. 'en', 'es'). Defaults to 'auto'." }
+                            "language": { "type": "string", "description": "Language code (e.g. 'en', 'es'). Defaults to 'auto'." },
+                            "format": { "type": "string", "enum": ["text", "json", "srt", "vtt", "markdown"], "description": "Output format. 'json' and 'markdown' embed clickable links to each timestamp. Defaults to 'text'." }
                         },
                         "required": ["url"],
                     },
@@ -204,8 +211,12 @@ async fn dispatch(state: &AppState, rpc: RpcRequest) -> RpcResponse {
                 .get("language")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("auto");
+            let format = args
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("text");
 
-            match get_transcript(&state.client, url, language).await {
+            match get_transcript(&state.client, url, language, format).await {
                 Ok(r) => RpcResponse::ok(
                     id,
                     serde_json::json!({
