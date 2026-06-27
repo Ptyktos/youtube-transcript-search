@@ -8,6 +8,8 @@
   (via WebAssembly) — same logic, two deployment targets.
 </div>
 
+![youtube-transcript-search artwork](assets/social-card.png)
+
 ## Features
 
 - **Single tool**: `get_transcript(url, language?, format?)` — works with any
